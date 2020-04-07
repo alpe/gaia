@@ -4,6 +4,8 @@ import (
 	"io"
 	"os"
 
+	"github.com/cosmos/modules/incubator/group"
+	"github.com/cosmos/modules/incubator/group/testdata"
 	abci "github.com/tendermint/tendermint/abci/types"
 	"github.com/tendermint/tendermint/libs/log"
 	tmos "github.com/tendermint/tendermint/libs/os"
@@ -60,6 +62,8 @@ var (
 		supply.AppModuleBasic{},
 		upgrade.AppModuleBasic{},
 		evidence.AppModuleBasic{},
+		group.AppModuleBasic{TXGenerator:testdata.TXFactory{}},
+		testdata.AppModule{},
 	)
 
 	// module account permissions
@@ -122,13 +126,17 @@ func NewGaiaApp(
 	cdc := codecstd.MakeCodec(ModuleBasics)
 	appCodec := codecstd.NewAppCodec(cdc)
 
-	bApp := bam.NewBaseApp(appName, logger, db, auth.DefaultTxDecoder(cdc), baseAppOptions...)
+	// todo: for genTX handling in genesis the default Decoder is required
+	//bApp := bam.NewBaseApp(appName, logger, db, auth.DefaultTxDecoder(cdc), baseAppOptions...)
+
+	bApp := bam.NewBaseApp(appName, logger, db, switchingDecoder(cdc, appCodec), baseAppOptions...)
 	bApp.SetCommitMultiStoreTracer(traceStore)
 	bApp.SetAppVersion(version.Version)
 	keys := sdk.NewKVStoreKeys(
 		bam.MainStoreKey, auth.StoreKey, bank.StoreKey, staking.StoreKey,
 		supply.StoreKey, mint.StoreKey, distr.StoreKey, slashing.StoreKey,
 		gov.StoreKey, params.StoreKey, evidence.StoreKey, upgrade.StoreKey,
+		group.StoreKeyName, testdata.ModuleName,
 	)
 	tKeys := sdk.NewTransientStoreKeys(staking.TStoreKey, params.TStoreKey)
 
@@ -152,6 +160,11 @@ func NewGaiaApp(
 	app.subspaces[gov.ModuleName] = app.paramsKeeper.Subspace(gov.DefaultParamspace).WithKeyTable(gov.ParamKeyTable())
 	app.subspaces[crisis.ModuleName] = app.paramsKeeper.Subspace(crisis.DefaultParamspace)
 	app.subspaces[evidence.ModuleName] = app.paramsKeeper.Subspace(evidence.DefaultParamspace)
+	app.subspaces[group.ModuleName] = app.paramsKeeper.Subspace(group.DefaultParamspace)
+	app.subspaces[testdata.ModuleName] = app.paramsKeeper.Subspace(testdata.ModuleName)
+
+	groupKeeper := group.NewGroupKeeper(keys[group.StoreKeyName], app.subspaces[group.ModuleName], app.Router(), &testdata.MyAppProposal{})
+	testdataKeeper := testdata.NewKeeper(keys[testdata.ModuleName], groupKeeper)
 
 	// add keepers
 	app.accountKeeper = auth.NewAccountKeeper(
@@ -225,6 +238,8 @@ func NewGaiaApp(
 		staking.NewAppModule(app.stakingKeeper, app.accountKeeper, app.bankKeeper, app.supplyKeeper),
 		upgrade.NewAppModule(app.upgradeKeeper),
 		evidence.NewAppModule(app.evidenceKeeper),
+		group.NewAppModule(groupKeeper),
+		testdata.NewAppModule(testdataKeeper),
 	)
 	// During begin block slashing happens after distr.BeginBlocker so that
 	// there is nothing left over in the validator fee pool, so as to keep the
@@ -239,6 +254,7 @@ func NewGaiaApp(
 		distr.ModuleName, staking.ModuleName, auth.ModuleName, bank.ModuleName,
 		slashing.ModuleName, gov.ModuleName, mint.ModuleName, supply.ModuleName,
 		crisis.ModuleName, genutil.ModuleName, evidence.ModuleName,
+		group.ModuleName, testdata.ModuleName,
 	)
 
 	app.mm.RegisterInvariants(&app.crisisKeeper)
@@ -279,6 +295,21 @@ func NewGaiaApp(
 	}
 
 	return app
+}
+
+// todo: for genTX handling in genesis the default Decoder is required. For other Tx the new protobuf.
+// trying to workaround by this hack:
+func switchingDecoder(amino *codec.Codec, appCodec *codecstd.Codec) sdk.TxDecoder {
+	var calls int
+	return func(txBytes []byte) (tx sdk.Tx, err error) {
+		if calls < 1 {
+			calls++
+			println("++++++ calls: ", calls)
+			return auth.DefaultTxDecoder(amino)(txBytes)
+		} else {
+			return testdata.TxDecoder(appCodec)(txBytes)
+		}
+	}
 }
 
 // Name returns the name of the App
